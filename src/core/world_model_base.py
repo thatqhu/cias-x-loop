@@ -9,5 +9,9 @@ class WorldModelBase(ABC):
         pass
 
     @abstractmethod
+    def count_experiments(self) -> int:
+        pass
+
+    @abstractmethod
     def update_with_insights(self, insights):
         pass

@@ -190,47 +190,6 @@ class WorldModel(WorldModelBase):
         conn.close()
         logger.info(f"Experiment added: {result.experiment_id} ({result.status})")
 
-    def get_all_experiments(self) -> List[Any]:
-        """
-        Get all successful experiments
-
-        Returns:
-            List of experiment results (simplified objects)
-        """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT e.experiment_id, e.config_json, e.status,
-                   m.psnr, m.ssim, m.coverage, m.latency, m.memory, m.training_time
-            FROM experiments e
-            LEFT JOIN metrics m ON e.experiment_id = m.experiment_id
-            WHERE e.status = 'success'
-        """)
-
-        results = []
-        for row in cursor.fetchall():
-            if row[3] is not None:
-                # Simplified: only create necessary fields
-                exp = type('Exp', (), {
-                    'experiment_id': row[0],
-                    'status': row[2],
-                    'metrics': type('Metrics', (), {
-                        'psnr': row[3],
-                        'ssim': row[4],
-                        'coverage': row[5],
-                        'latency': row[6],
-                        'memory': row[7],
-                        'training_time': row[8]
-                    })(),
-                    'config': json.loads(row[1])
-                })()
-                results.append(exp)
-
-        conn.close()
-        return results
-
-
     def get_experiments_by_ids(self, experiment_ids: List[str]) -> List[Any]:
         """
         Get specific experiments by ID
@@ -351,15 +310,6 @@ class WorldModel(WorldModelBase):
 
         conn.close()
         return results
-
-    def get_all_experiment_ids(self) -> List[str]:
-        """Get list of all experiment IDs (lightweight)"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT experiment_id FROM experiments WHERE status='success'")
-        ids = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return ids
 
     def check_config_exists(self, config_hash: str) -> bool:
         """

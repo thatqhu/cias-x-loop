@@ -90,7 +90,7 @@ class AIScientist:
             self.plan_retries += 1
             logger.info(f"Retrying planning (Attempt {self.plan_retries + 1})...")
             # Trigger replanning
-            budget_remaining = self.budget_max - len(self.world_model.get_all_experiments())
+            budget_remaining = self.budget_max - self.world_model.count_experiments
             await self.bus.publish(Event(
                 "PLAN_REQUESTED",
                 {"budget": min(3, budget_remaining), "design_space": self.design_space, "cycle": self.current_cycle},
@@ -112,7 +112,7 @@ class AIScientist:
             self.world_model.add_experiment(result)
             self.completed_experiments_cycle += 1
 
-            total_done = len(self.world_model.get_all_experiments())
+            total_done = self.world_model.count_experiments
             logger.info(f"Progress: {self.completed_experiments_cycle}/{self.expected_experiments} in cycle (Total: {total_done})")
 
             # Check if current batch is done
@@ -149,7 +149,7 @@ class AIScientist:
         except Exception as e:
             logger.error(f"Error updating WorldModel with insights: {e}")
 
-        budget_used = len(self.world_model.get_all_experiments())
+        budget_used = self.world_model.count_experiments
         logger.info(f"Cycle {self.current_cycle} Analysis Complete. Budget: {budget_used}/{self.budget_max}")
 
         if budget_used < self.budget_max and self.current_cycle < self.max_cycles:
@@ -209,101 +209,3 @@ class AIScientist:
         logger.info(f"Run Complete!")
 
         return self.final_pareto, self.final_insights
-
-    def run(
-        self,
-        initial_configs: List[Any],
-        max_cycles: int = 5
-    ) -> Tuple[List[str], Dict[str, Any]]:
-        """
-        Run AI Scientist main loop (sync wrapper for async execution)
-
-        Args:
-            initial_configs: List of initial experiment configurations
-            max_cycles: Maximum number of cycles
-
-        Returns:
-            Tuple[List[str], Dict]: Pareto front experiment IDs and insights
-        """
-        return asyncio.run(self.run_async(initial_configs, max_cycles))
-
-    def run_sync(
-        self,
-        initial_configs: List[Any],
-        max_cycles: int = 5
-    ) -> Tuple[List[str], Dict[str, Any]]:
-        """
-        Run AI Scientist main loop (sequential execution, no async)
-
-        Requires agents to implement specific sync methods (plan_experiments, run_experiment, analyze).
-
-        Args:
-            initial_configs: List of initial experiment configurations
-            max_cycles: Maximum number of cycles
-
-        Returns:
-            Tuple[List[str], Dict]: Pareto front experiment IDs and insights
-        """
-        logger.info(f"AI Scientist starting (sync): budget={self.budget_max}, cycles={max_cycles}")
-
-        budget_used = 0
-        pareto_set = []
-        final_insights = {}
-
-        # Initialization phase: run initial experiments sequentially
-        for config in initial_configs:
-            result = self.executor.run_experiment(config)
-            self.world_model.add_experiment(result)
-            budget_used += 1
-
-        logger.info(f"Initialization complete: {budget_used} experiments")
-
-        # Main loop
-        cycle = 0
-
-        while budget_used < self.budget_max and cycle < max_cycles:
-            cycle += 1
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Cycle {cycle}/{max_cycles}")
-            logger.info(f"{'='*60}")
-
-            # 1. Summarize
-            summary = self.world_model.summarize()
-            logger.info(f"Completed: {summary['total_experiments']} experiments")
-            if summary['psnr_stats']['max'] > 0:
-                logger.info(f"Best PSNR: {summary['psnr_stats']['max']:.2f} dB")
-
-            # 2. Plan
-            budget_remaining = self.budget_max - budget_used
-            existing_experiments = self.world_model.get_all_experiments()
-            new_configs = self.planner.plan_experiments(
-                summary, self.design_space, min(3, budget_remaining),
-                existing_experiments=existing_experiments,
-                world_model=self.world_model
-            )
-            logger.info(f"Planner: {len(new_configs)} new configs")
-
-            # 3. Execute sequentially
-            for config in new_configs:
-                if budget_used >= self.budget_max:
-                    break
-                result = self.executor.run_experiment(config)
-                self.world_model.add_experiment(result)
-                budget_used += 1
-
-            # 4. Analyze
-            pareto_set, insights = self.analyzer.analyze(self.world_model, cycle)
-            logger.info(f"Pareto: {len(pareto_set)} experiments")
-
-            if 'trends' in insights and 'key_findings' in insights['trends']:
-                logger.info("LLM Trends:")
-                for finding in insights['trends']['key_findings'][:3]:
-                    logger.info(f"  - {finding}")
-
-            final_insights = insights
-
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Run Complete! Total: {budget_used} experiments")
-        logger.info(f"{'='*60}")
-
-        return pareto_set, final_insights
