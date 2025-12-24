@@ -15,41 +15,24 @@ from .world_model import WorldModel
 
 from ...agents.utils import Utils
 
-
-from ...core.bus import MessageBus, Event
 from ..base import BaseAgent
 
 
 class AnalysisAgent(BaseAgent):
-    """Analysis Agent - Uses LLM for intelligent analysis (Event-Driven)"""
+    """Analysis Agent - Uses LLM for intelligent analysis"""
 
-    def __init__(self, llm_config: Dict[str, Any], bus: MessageBus, world_model: WorldModel):
+    def __init__(self, llm_client: LLMClient, world_model: WorldModel):
         """
         Initialize analysis agent
 
         Args:
-            llm_config: LLM configuration dictionary
-            bus: Message Bus
-            world_model: World Model instance
+            llm_client: LLM client
+            world_model: World Model instance (for context pulling)
         """
-        super().__init__("AnalysisAgent", bus)
+        super().__init__("AnalysisAgent", llm_client, world_model)
 
-        self.llm_client = LLMClient(llm_config)
-        self.world_model = world_model
         self.objectives = ['psnr', 'ssim', 'latency']
         logger.info("Analysis Agent initialized with LLM")
-
-    def setup_subscriptions(self):
-        self.bus.subscribe("ANALYSIS_REQUESTED", self._on_analysis_requested)
-
-    async def _on_analysis_requested(self, event: Event):
-        """Handle Analysis Requested event"""
-        logger.debug(f"Analysis agent received ANALYSIS_REQUESTED: {event.payload}")
-        if event.payload.get('trigger_analysis', False):
-            cycle = event.payload.get('cycle', 1)
-            logger.info(f"Triggering analysis for cycle {cycle}...")
-            # Run analysis
-            await self.run_analysis(cycle)
 
     async def run_analysis(self, cycle: int):
         if not self.world_model:
@@ -57,13 +40,6 @@ class AnalysisAgent(BaseAgent):
 
         logger.info(f"Running analysis for cycle {cycle}")
         pareto_ids, insights = self.analyze(cycle)
-
-        # Publish completion event with full insights payload
-        await self.publish("INSIGHT_GENERATED", {
-            "insights": insights,
-            "pareto_ids": pareto_ids,
-            "cycle": cycle
-        })
 
         return pareto_ids, insights
 

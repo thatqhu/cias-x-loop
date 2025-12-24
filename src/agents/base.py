@@ -1,38 +1,16 @@
-"""
-Base Agent Class
-"""
-
-from abc import ABC, abstractmethod
-from typing import Any
+from abc import ABC
 import logging
-
-from ..core.bus import MessageBus, Event
+from ..llm.client import LLMClient
+from ..core.world_model_base import WorldModelBase
 
 logger = logging.getLogger(__name__)
 
 
 class BaseAgent(ABC):
-    """Abstract base class for all event-driven agents"""
+    """Abstract base class for all agents"""
 
-    def __init__(self, name: str, bus: MessageBus):
+    def __init__(self, name: str, llm_client: LLMClient, world_model: WorldModelBase):
         self.name = name
-        self.bus = bus
-        self.setup_subscriptions()
+        self.llm_client = llm_client
+        self.world_model = world_model
         logger.debug(f"Agent {name} initialized")
-
-    @abstractmethod
-    def setup_subscriptions(self):
-        """Register interest in specific topics"""
-        pass
-
-    async def publish(self, topic: str, payload: Any = None):
-        """Helper to publish events"""
-        if payload is None:
-            payload = {}
-
-        event = Event(
-            topic=topic,
-            payload=payload,
-            sender=self.name
-        )
-        await self.bus.publish(event)

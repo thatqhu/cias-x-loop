@@ -12,66 +12,28 @@ import json
 from .structures import SCIConfiguration, ReviewResult
 from ...llm.client import LLMClient
 from ...agents.utils import Utils
+from ...llm.client import LLMClient
+from .world_model import WorldModel
 
-
-from ...core.bus import MessageBus, Event
 from ..base import BaseAgent
 
 
 class PlanReviewerAgent(BaseAgent):
-    """Agent for reviewing and validating experiment plans (Event-Driven)"""
+    """Agent for reviewing and validating experiment plans"""
 
-    def __init__(
-        self,
-        llm_client: LLMClient,
-        bus: MessageBus,
-        design_space: Dict[str, Any],
-        world_model: Optional[Any] = None
-    ):
+    def __init__(self, design_space: Dict[str, Any], llm_client: LLMClient, world_model: WorldModel):
         """
         Initialize Reviewer Agent
 
         Args:
-            llm_client: LLM client for semantic review
-            bus: Message Bus
             design_space: Valid design space for rule-based verification
+            llm_client: LLM client for semantic review
             world_model: World Model instance
         """
-        super().__init__("ReviewerAgent", bus)
+        super().__init__("ReviewerAgent", llm_client, world_model)
 
-        self.llm_client = llm_client
         self.design_space = design_space
-        self.world_model = world_model
         logger.info("Plan Reviewer Agent initialized")
-
-    def setup_subscriptions(self):
-        self.bus.subscribe("PLAN_PROPOSED", self._on_plan_proposed)
-
-    async def _on_plan_proposed(self, event: Event):
-        logger.info("Received PLAN_PROPOSED signal")
-        configs = event.payload.get('configs', [])
-
-        if not configs:
-            logger.warning("Received empty plan, skipping review.")
-            return
-
-        # Prepare context
-        context = {}
-        if self.world_model:
-            summary = self.world_model.summarize()
-            context['cycle'] = '?'  # Would be good to track cycle in WM
-            context['best_psnr'] = f"{summary['psnr_stats']['max']:.2f}"
-
-        # Review
-        result = await self.review_plan(configs, context)
-
-        if result.approved:
-            await self.publish("PLAN_APPROVED", {"configs": result.approved_configs})
-        else:
-            await self.publish("PLAN_REJECTED", {
-                "feedback": result.feedback,
-                "original_configs": configs
-            })
 
     async def review_plan(
         self,

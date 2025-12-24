@@ -13,5 +13,10 @@ class WorldModelBase(ABC):
         pass
 
     @abstractmethod
+    def summarize(self) -> dict:
+        """Return a summary of the current world state"""
+        pass
+
+    @abstractmethod
     def update_with_insights(self, insights):
         pass

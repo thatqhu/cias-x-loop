@@ -12,6 +12,8 @@ from typing import List, Dict, Any, Set, Optional
 from datetime import datetime
 from dataclasses import asdict
 from enum import Enum
+from ...llm.client import LLMClient
+from .world_model import WorldModel
 
 from loguru import logger
 
@@ -27,92 +29,33 @@ from .structures import (
 from ...llm.client import LLMClient
 from ...agents.utils import Utils
 
-
-
-
-
-from ...core.bus import MessageBus, Event
 from ..base import BaseAgent
 
-
 class PlannerAgent(BaseAgent):
-    """LLM-driven experiment planning agent with deduplication (Event-Driven)"""
+    """LLM-driven experiment planning agent with deduplication"""
 
-    def __init__(
-        self,
-        config: Dict[str, Any],
-        bus: MessageBus,
-        world_model: Optional[Any] = None,
-        llm_config: Optional[Dict[str, Any]] = None
-    ):
+    def __init__(self, config: Dict[str, Any], llm_client: LLMClient, world_model: WorldModel):
         """
         Initialize planner agent
 
         Args:
-            config: Configuration dictionary
-            bus: Message Bus
+            llm_client: LLM client
             world_model: World Model instance (for context pulling)
-            llm_config: LLM configuration
         """
-        super().__init__("PlannerAgent", bus)
+        super().__init__("PlannerAgent", llm_client, world_model)
 
-        self.config = config
-        self.world_model = world_model
         self.max_configs_per_cycle = config.get("max_configs_per_cycle", 3)
-        self.use_llm = config.get("use_llm", True) and llm_config is not None
+        self.use_llm = config.get("use_llm", True) and llm_client is not None
         self.max_dedup_retries = config.get("max_dedup_retries", 5)
 
-        # Initialize LLM client if config provided
-        self.llm_client = None
-        if llm_config:
-            try:
-                self.llm_client = LLMClient(llm_config)
-            except Exception as e:
-                logger.warning(f"Failed to initialize LLM client: {e}")
-                self.use_llm = False
-
-
-
         logger.info(f"Planner Agent initialized (max {self.max_configs_per_cycle} per cycle, LLM={self.use_llm})")
-
-    def setup_subscriptions(self):
-        """Register subscriptions"""
-        self.bus.subscribe("PLAN_REQUESTED", self._on_plan_requested)
-
-    async def _on_plan_requested(self, event: Event):
-        """Handle plan request"""
-        logger.info("Received PLAN_REQUESTED signal")
-
-        budget = event.payload.get('budget', 3)
-        design_space = event.payload.get('design_space', {})
-
-        if not self.world_model:
-            logger.error("Planner has no WorldModel reference, cannot plan!")
-            return
-
-        # Pull context from WorldModel
-        summary = self.world_model.summarize()
-
-
-        # Plan
-        configs = self.plan_experiments(
-            summary,
-            design_space,
-            budget,
-            self.world_model
-        )
-
-        # Publish
-        await self.publish("PLAN_PROPOSED", {"configs": configs})
-
-
 
     def plan_experiments(
         self,
         world_summary: Dict[str, Any],
         design_space: Dict[str, List[Any]],
         budget: int,
-        world_model: Optional[Any] = None
+        feedback: str = ""
     ) -> List[SCIConfiguration]:
         """
         Plan new experiments using LLM with rich context
@@ -121,7 +64,6 @@ class PlannerAgent(BaseAgent):
             world_summary: World model summary
             design_space: Design space definition
             budget: Remaining budget
-            world_model: Optional WorldModel for accessing Pareto front and historical analyses
 
         Returns:
             List of new experiment configurations (deduplicated)
@@ -133,12 +75,12 @@ class PlannerAgent(BaseAgent):
         configs = []
 
         # Gather rich context from WorldModel
-        context = self._gather_planning_context(world_model)
+        context = self._gather_planning_context()
 
         if self.use_llm and self.llm_client:
             # Use LLM to generate configs with rich context
             llm_configs = self._llm_generate_configs(
-                world_summary, design_space, num_configs, context
+                world_summary, design_space, num_configs, context, feedback
             )
             configs.extend(llm_configs)
 
@@ -154,15 +96,9 @@ class PlannerAgent(BaseAgent):
         logger.info(f"Planned {len(configs)} unique experiments")
         return configs
 
-    def _gather_planning_context(
-        self,
-        world_model: Optional[Any]
-    ) -> Dict[str, Any]:
+    def _gather_planning_context(self) -> Dict[str, Any]:
         """
         Gather rich context for LLM planning
-
-        Args:
-            world_model: WorldModel instance
 
         Returns:
             Context dictionary with Pareto front, insights, recommendations
@@ -174,12 +110,12 @@ class PlannerAgent(BaseAgent):
             'recommendations': []
         }
 
-        if not world_model:
+        if not self.world_model:
             return context
 
         try:
             # Get Top 5 experiments for context (Exploitation)
-            best_exps = world_model.get_top_experiments(limit=5, metric='psnr')
+            best_exps = self.world_model.get_top_experiments(limit=5, metric='psnr')
             for exp in best_exps:
                 context['best_experiments'].append({
                     'id': exp.experiment_id,
@@ -189,7 +125,7 @@ class PlannerAgent(BaseAgent):
                 })
 
             # Get Pareto front details
-            pareto_detail = world_model.get_pareto_detail(cycle=1)  # Latest cycle
+            pareto_detail = self.world_model.get_pareto_detail(cycle=1)  # Latest cycle
             for exp in pareto_detail[:5]:  # Top 5
                 context['pareto_configs'].append({
                     'id': exp['experiment_id'],
@@ -198,7 +134,7 @@ class PlannerAgent(BaseAgent):
                 })
 
             # Get historical LLM insights
-            analyses = world_model.get_historical_analyses(limit=3)
+            analyses = self.world_model.get_historical_analyses(limit=3)
             for analysis in analyses:
                 if analysis['type'] in ['trend_analysis', 'recommendation']:
                     conclusions = analysis.get('conclusions', {})
@@ -245,7 +181,8 @@ class PlannerAgent(BaseAgent):
         world_summary: Dict[str, Any],
         design_space: Dict[str, List[Any]],
         num_configs: int,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]] = None,
+        feedback: str = ""
     ) -> List[SCIConfiguration]:
         """
         Use LLM to generate experiment configurations with rich context
@@ -259,7 +196,7 @@ class PlannerAgent(BaseAgent):
         Returns:
             List of generated configurations
         """
-        prompt = self._build_planning_prompt(world_summary, design_space, num_configs, context)
+        prompt = self._build_planning_prompt(world_summary, design_space, num_configs, context, feedback)
 
         messages = [
             {"role": "system", "content": """You are an expert in computational imaging and SCI (Snapshot Compressive Imaging) reconstruction.
@@ -293,7 +230,8 @@ Always respond with valid JSON."""},
         world_summary: Dict[str, Any],
         design_space: Dict[str, List[Any]],
         num_configs: int,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]] = None,
+        feedback: str = ""
     ) -> str:
         """Build the prompt for LLM planning with rich context"""
 
@@ -347,13 +285,22 @@ These configurations represent the current best trade-offs between quality and e
 {chr(10).join(rec_lines)}
 """
 
+        # Build feedback section
+        feedback_section = ""
+        if feedback:
+            feedback_section = f"""
+## CRITICAL FEEDBACK FROM REVIEWER (MUST ADDRESS)
+The previous plan was rejected. You MUST fix the following issues:
+{feedback}
+"""
+
         prompt = f"""Based on the current experiment progress, suggest {num_configs} new experiment configurations.
 
 ## Current Progress
 - Total completed experiments: {world_summary.get('total_experiments', 0)}
 - PSNR stats: avg={world_summary.get('psnr_stats', {}).get('avg', 0):.2f}, max={world_summary.get('psnr_stats', {}).get('max', 0):.2f}, min={world_summary.get('psnr_stats', {}).get('min', 0):.2f} dB
 - SSIM stats: avg={world_summary.get('ssim_stats', {}).get('avg', 0):.4f}, max={world_summary.get('ssim_stats', {}).get('max', 0):.4f}
-{pareto_section}{insights_section}{recommendations_section}
+{pareto_section}{insights_section}{recommendations_section}{feedback_section}
 ## Design Space (choose values from these options ONLY)
 - compression_ratios: {design_space.get('compression_ratios', [8, 16, 24])}
 - mask_types: {design_space.get('mask_types', ['random', 'optimized'])}
@@ -367,7 +314,8 @@ These configurations represent the current best trade-offs between quality and e
 1. **Exploitation**: Suggest configs similar to Pareto front configs to refine best regions
 2. **Exploration**: Test under-explored parameter combinations
 3. **Use insights**: Apply learnings from previous analysis
-4. **Avoid duplicates**: Don't repeat tested configurations
+4. **ADDRESS FEEDBACK**: If feedback is provided above, you MUST correct your plan accordingly.
+5. **Avoid duplicates**: Don't repeat tested configurations
 5. Each configuration must use values from the design space above ONLY
 
 ## Response Format

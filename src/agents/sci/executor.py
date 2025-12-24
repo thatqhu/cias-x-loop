@@ -16,6 +16,8 @@ import aiohttp
 import requests
 import numpy as np
 from loguru import logger
+from ...llm.client import LLMClient
+from .world_model import WorldModel
 
 from .structures import (
     SCIConfiguration,
@@ -33,22 +35,21 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
-from src.core.bus import MessageBus, Event
 from ..base import BaseAgent
 
 
 class ExecutorAgent(BaseAgent):
-    """Experiment execution agent with async and remote service support (Event-Driven)"""
+    """Experiment execution agent with async and remote service support"""
 
-    def __init__(self, config: Dict[str, Any], bus: MessageBus):
+    def __init__(self, config: Dict[str, Any], llm_client: LLMClient, world_model: WorldModel):
         """
         Initialize executor agent
 
         Args:
-            config: Executor configuration
-            bus: Message Bus
+            llm_client: LLM client
+            world_model: World Model instance (for context pulling)
         """
-        super().__init__("ExecutorAgent", bus)
+        super().__init__("ExecutorAgent", llm_client, world_model)
 
         self.mock_mode = config.get('mock', False)
         self.api_base_url = config.get('api_base_url', 'http://localhost:8000')
@@ -57,24 +58,6 @@ class ExecutorAgent(BaseAgent):
         self.max_poll_attempts = config.get('max_poll_attempts', 300)
 
         logger.info(f"Executor Agent initialized (mock={self.mock_mode}, api={self.api_base_url})")
-
-    def setup_subscriptions(self):
-        self.bus.subscribe("PLAN_APPROVED", self._on_plan_approved)
-
-    async def _on_plan_approved(self, event: Event):
-        logger.info("Received PLAN_APPROVED signal")
-        configs = event.payload.get('configs', [])
-
-        if not configs:
-            return
-
-        # Execute experiments
-        logger.info(f"Executing {len(configs)} approved experiments...")
-        results = await self.run_experiments_async(configs)
-
-        # Publish completed events for each result
-        for result in results:
-            await self.publish("EXPERIMENT_COMPLETED", {"result": result})
 
     # ==================== Sync Methods ====================
 

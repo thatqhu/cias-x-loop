@@ -11,7 +11,6 @@ Key Features:
 __version__ = "3.0.0"
 __author__ = "AI Scientist Team"
 
-from .core.scientist import AIScientist
 from .agents.sci.structures import (
     SCIConfiguration,
     ForwardConfig,
@@ -28,12 +27,9 @@ from .agents.sci.planner import PlannerAgent
 from .agents.sci.executor import ExecutorAgent
 from .agents.sci.analysis import AnalysisAgent
 from .agents.sci.reviewer import PlanReviewerAgent
-from .core.bus import MessageBus, Event
 from .llm.client import LLMClient
 
 __all__ = [
-    # Core
-    "AIScientist",
     # Data Structures
     "SCIConfiguration",
     "ForwardConfig",
@@ -51,9 +47,6 @@ __all__ = [
     "ExecutorAgent",
     "AnalysisAgent",
     "PlanReviewerAgent",
-    # Core Infrastructure
-    "MessageBus",
-    "Event",
     # LLM
     "LLMClient",
 ]
