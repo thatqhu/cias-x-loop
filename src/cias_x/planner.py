@@ -93,7 +93,8 @@ class CIASPlannerAgent:
         return {
             "design_id": design_id,
             "configs": new_configs,
-            "status": "executing"
+            "status": "executing",
+            "executed_experiment_count": state.get("executed_experiment_count", 0) + self.max_configs_per_cycle
         }
 
     def _build_planner_prompt(

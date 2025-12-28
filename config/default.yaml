@@ -50,7 +50,7 @@ experiment:
 # Planner Settings
 planner:
   max_configs_per_cycle: 3
-  design_id: -1 # resume from design, -1 means start from scratch
+  design_id: 0 # resume from design, 0 means start from scratch
 
 pareto:
   top_k: 10

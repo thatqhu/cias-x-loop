@@ -49,7 +49,7 @@ class CIASAnalystAgent:
         logger.info("Analyst Agent: Starting analysis phase")
 
         design_id = state.get("design_id")
-        plan_cycle = state.get("plan_cycle", 1)
+        executed_experiment_count = state.get("executed_experiment_count", 0)
         experiments = state.get("experiments", [])
         budget_remaining = state.get("budget_remaining", 0)
 
@@ -118,7 +118,6 @@ class CIASAnalystAgent:
             "pareto_frontiers": flat_frontiers,
             "global_summary": global_summary,
             "budget_remaining": new_budget,
-            "plan_cycle": plan_cycle + 1,
             "status": next_status
         }
 
@@ -147,7 +146,7 @@ class CIASAnalystAgent:
             top_k = []
             for rank, item in enumerate(sorted_pareto[:self.world_model.top_k], start=1):
                 top_k.append({
-                    "experiment_id": item.get('id', 0),
+                    "experiment_id": item.get('experiment_id', 0),
                     "rank": rank,
                     "config": item['config'],
                     "metrics": item['metrics']

@@ -115,7 +115,7 @@ async def run_workflow(args):
 
     # Initial state
     initial_state: AgentState = {
-        "plan_cycle": 1,
+        "executed_experiment_count": 0,
         "design_space": design_space,
         "budget_remaining": budget,
         "design_id": design_id,  # Planner will initialize
@@ -138,7 +138,7 @@ async def run_workflow(args):
         logger.info("=" * 60)
         logger.info("CIAS-X Workflow Completed")
         logger.info(f"  Final Status: {final_state.get('status')}")
-        logger.info(f"  Plan Cycles: {final_state.get('plan_cycle', 1) - 1}")
+        logger.info(f"  Total Executed Experiments: {final_state.get('executed_experiment_count', 0)}")
         logger.info(f"  Budget Remaining: {final_state.get('budget_remaining')}")
 
         pareto_frontiers = final_state.get('pareto_frontiers', [])

@@ -92,11 +92,10 @@ class CIASExecutorAgent:
 
         design_id = state.get("design_id")
         configs = state.get("configs", [])
-        plan_cycle = state.get("plan_cycle", 1)
 
         # 1. Create plan record
-        plan_id = self.world_model.create_plan(design_id, plan_cycle)
-        logger.info(f"Created Plan ID: {plan_id} for cycle {plan_cycle}")
+        plan_id = self.world_model.create_plan(design_id)
+        logger.info(f"Created Plan ID: {plan_id} for design {design_id}")
 
         # 2. Execute experiments
         experiments = []
@@ -119,6 +118,7 @@ class CIASExecutorAgent:
             logger.debug(f"Saved experiment {result.experiment_id} with DB ID {exp_id}")
 
         logger.info(f"Executor Agent: Completed {len(experiments)} experiments")
+        logger.info(f"Executor Agent: Total executed experiments: {state.get('executed_experiment_count')}")
 
         # 4. Update state
         return {

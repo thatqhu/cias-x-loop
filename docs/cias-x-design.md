@@ -33,7 +33,7 @@ This project will use langgraph as the agent workflow handler. The graph state s
         """
         Global State for the AI Scientist Multi-Agent Workflow (LangGraph)
         """
-        plan_cycle: int
+        executed_experiment_count: int
 
         # Static / Read-only
         design_space: Dict[str, Any]
@@ -95,7 +95,7 @@ The **Executor Agent** can be blank as I already has an implementation. Currentl
 
 The **Analyst Agent** will combine current experiments and the experiments in `pareto_frontiers` table to get the new top k pareto frotiers for each strata, then save them back to `pareto_frontiers` table. the description for `pareto_frontiers` table:
 
--- `experiment_id` - Fk of `experiments`.id
+-- `experiment_id` - `experiments`.experiment_id
 -- `rank` - the pareto frontier rank
 -- `strata` - 'T', 'dose'...
 

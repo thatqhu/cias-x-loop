@@ -63,7 +63,6 @@ class CIASWorldModel:
                 CREATE TABLE IF NOT EXISTS plans (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     design_id INTEGER NOT NULL,
-                    plan_cycle INTEGER NOT NULL,
                     summary TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(design_id) REFERENCES designs(id)
@@ -74,6 +73,7 @@ class CIASWorldModel:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS experiments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    experiment_id TEXT NOT NULL,
                     plan_id INTEGER NOT NULL,
                     config JSON NOT NULL,
                     metrics JSON NOT NULL,
@@ -88,13 +88,13 @@ class CIASWorldModel:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pareto_frontiers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    experiment_id INTEGER,
+                    experiment_id TEXT NOT NULL,
                     rank INTEGER NOT NULL,
                     strata TEXT NOT NULL,
                     config JSON NOT NULL,
                     metrics JSON NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+                    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
                 )
             """)
 
@@ -161,13 +161,13 @@ class CIASWorldModel:
 
     # ==================== Plan Operations ====================
 
-    def create_plan(self, design_id: int, plan_cycle: int) -> int:
+    def create_plan(self, design_id: int) -> int:
         """Create a new plan record."""
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO plans (design_id, plan_cycle) VALUES (?, ?)",
-                (design_id, plan_cycle)
+                "INSERT INTO plans (design_id) VALUES (?)",
+                (design_id,)
             )
             conn.commit()
             return cursor.lastrowid
@@ -213,8 +213,8 @@ class CIASWorldModel:
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO experiments (plan_id, config, metrics, artifacts, status) VALUES (?, ?, ?, ?, ?)",
-                (plan_id, json.dumps(config), json.dumps(metrics), json.dumps(artifacts or {}), status)
+                "INSERT INTO experiments (plan_id, experiment_id, config, metrics, artifacts, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (plan_id, config['experiment_id'], json.dumps(config), json.dumps(metrics), json.dumps(artifacts or {}), status)
             )
             conn.commit()
             return cursor.lastrowid

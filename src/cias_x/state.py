@@ -11,7 +11,7 @@ class AgentState(TypedDict):
     """
     Global State for the AI Scientist Multi-Agent Workflow (LangGraph)
     """
-    plan_cycle: int
+    executed_experiment_count: int
 
     # Static / Read-only
     design_space: Dict[str, Any]
