@@ -99,18 +99,8 @@ class CIASAnalystAgent:
             logger.info(f"Updated plan {latest_plan_id} with summary")
 
         # 7. Check if global summary needs update
-        # Always load current global summary from database
-        global_summary = self.world_model.get_global_summary(design_id)
-        last_summary_plan_id = self.world_model.get_last_summary_plan_id(design_id)
-        plans_since_last = 0
-        if last_summary_plan_id:
-            plans_since_last = self.world_model.get_plan_count_since(design_id, last_summary_plan_id)
-
         # Update global summary if threshold reached
-        token_used_design = 0
-        if not last_summary_plan_id or (plans_since_last >= self.global_summary_interval and latest_plan_id):
-            logger.info(f"Triggering global summary update ({plans_since_last} plans since last update)")
-            _, token_used_design = self._update_global_summary(design_id, global_summary, last_summary_plan_id, latest_plan_id)
+        token_used_design = self._try_update_global_summary(design_id)
 
         # Determine next status
         new_budget = budget_remaining - 1 # each plan - execution - analysis costs 1 budget
@@ -131,11 +121,23 @@ class CIASAnalystAgent:
             "status": next_status
         }
 
+    def _try_update_global_summary(self, design_id: int) -> int:
+        plans_since_last = self.world_model.get_plan_count_since(design_id)
+        total_plan_counts = self.world_model.count_plans(design_id)
+
+        init_scope = plans_since_last == 0 or (total_plan_counts < self.global_summary_interval and plans_since_last in [5, 10, 20, 35])
+        after_scope = plans_since_last >= self.global_summary_interval
+        if init_scope or after_scope:
+            logger.info(f"Triggering global summary update ({plans_since_last} plans since last update)")
+            _, token_used_design = self._update_global_summary(design_id)
+            return token_used_design
+        return 0
+
     def _compute_stratified_pareto_with_rank(self, all_experiments: List[Dict]) -> Dict[str, List[Dict]]:
         """
         Compute Pareto frontiers grouped by strata with rank.
 
-        Returns: Dict[strata, List[{experiment_id, rank, config, metrics}]]
+        Returns: Dict[strata, List[{experiment_id, rank, config, metrics}]>
         """
         # Group by strata
         grouped = {}
@@ -245,16 +247,15 @@ Output the summary text only (no JSON, no markdown, no bullet points - just a fl
             logger.error(f"Plan summary generation failed: {e}")
             return "Summary generation failed.", 0
 
-    def _update_global_summary(self, design_id: int, old_summary: str, since_plan_id: int, current_plan_id: int) -> tuple[str, int]:
+    def _update_global_summary(self, design_id: int) -> tuple[str, int]:
         """Generate and save updated global summary."""
-        recent_summaries = ''
-        if since_plan_id:
-            recent_summaries = self.world_model.get_plan_summaries_since(design_id, since_plan_id)
-        else:
-            recent_summaries = self.world_model.get_latest_plan_summary(design_id)
+        plan_id = self.world_model.get_last_summary_plan_id_in_design(design_id)
+        plan_id = plan_id if plan_id else 1
+        recent_summaries = self.world_model.get_plan_summaries_since(design_id, plan_id)
+        old_summary = self.world_model.get_global_summary(design_id)
 
         if not self.llm_client:
-            return old_summary, 0
+            return "", 0
 
         # Build prompt
         recent_text = "\n".join([f"- {s}" for s in recent_summaries])
@@ -280,8 +281,8 @@ Output the summary text only (no JSON, no markdown)."""
             new_summary = response['content'].strip()
 
             # Save to DB
-            self.world_model.update_global_summary(design_id, new_summary, current_plan_id)
-            logger.info(f"Updated global summary (new baseline plan_id: {current_plan_id})")
+            self.world_model.update_global_summary(design_id, new_summary)
+            logger.info(f"Updated global summary (new baseline plan_id: {plan_id})")
 
             return new_summary, response['tokens']
         except Exception as e:

@@ -143,46 +143,42 @@ class CIASWorldModel:
             row = cursor.fetchone()
             return row[0] if row else ""
 
-    def update_global_summary(self, design_id: int, summary: str, last_plan_id: int):
+    def update_global_summary(self, design_id: int, summary: str):
         """Update the global summary and last_summary_plan_id."""
         with self._get_conn() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM plans WHERE design_id = ? ORDER BY id DESC LIMIT 1",
+                (design_id,)
+            )
+            row = cursor.fetchone()
+            last_plan_id = row[0] if row else 1
             cursor.execute(
                 "UPDATE designs SET global_summary = ?, last_summary_plan_id = ?, updated_at = ? WHERE id = ?",
                 (summary, last_plan_id, datetime.now().isoformat(), design_id)
             )
             conn.commit()
 
-    def get_last_summary_plan_id(self, design_id: int) -> int:
-        """Get the plan_id at last global summary update."""
+    def get_last_summary_plan_id_in_design(self, design_id: int) -> int:
+        """Get number of plans since last global summary."""
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT last_summary_plan_id FROM designs WHERE id = ?", (design_id,))
             row = cursor.fetchone()
             return row[0] if row else 0
 
-    def get_plan_count_since(self, design_id: int, since_plan_id: int) -> int:
-        """Get number of plans since a given plan_id."""
+    def get_plan_count_since(self, design_id: int) -> int:
+        """Get number of plans since last global summary."""
+        plan_id = self.get_last_summary_plan_id_in_design(design_id)
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT COUNT(*) FROM plans WHERE design_id = ? AND id > ?",
-                (design_id, since_plan_id)
+                (design_id, plan_id)
             )
             row = cursor.fetchone()
             return row[0] if row else 0
 
-    def append_design_token_used(self, design_id: int, token_used: int):
-        """Update the token_used for a design."""
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT token_used FROM designs WHERE id = ?", (design_id,))
-            row = cursor.fetchone()
-            cursor.execute(
-                "UPDATE designs SET token_used = ? WHERE id = ?",
-                (row[0] + token_used, design_id)
-            )
-            conn.commit()
     # ==================== Plan Operations ====================
 
     def create_plan(self, design_id: int) -> int:
@@ -208,11 +204,12 @@ class CIASWorldModel:
 
     def get_plan_summaries_since(self, design_id: int, since_plan_id: int) -> List[str]:
         """Get plan summaries since a given plan_id."""
+        since_plan_id = since_plan_id if since_plan_id else 1
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """SELECT summary FROM plans
-                   WHERE design_id = ? AND id > ?
+                   WHERE design_id = ? AND id >= ?
                    ORDER BY id ASC""",
                 (design_id, since_plan_id)
             )
@@ -271,7 +268,29 @@ class CIASWorldModel:
                 """,
                 (token_total_used + token_used, token_plan_used, token_analysis_used, token_global_summary_used, plan_id)
             )
+
+            cursor.execute("SELECT design_id FROM plans WHERE id = ?", (plan_id,))
+            row = cursor.fetchone()
+            design_id = row[0] if row else 0
+
+            cursor.execute("SELECT token_used FROM designs WHERE id = ?", (design_id,))
+            row = cursor.fetchone()
+            design_token_used = row[0] if row else 0
+
+            cursor.execute(
+                "UPDATE designs SET token_used = ? WHERE id = ?",
+                (design_token_used + token_total_used + token_used, design_id)
+            )
+
             conn.commit()
+
+    def count_plans(self, design_id: int) -> int:
+        """Count the number of plans for a design."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM plans WHERE design_id = ?", (design_id,))
+            row = cursor.fetchone()
+            return row[0] if row else 0
     # ==================== Experiment Operations ====================
 
     def save_experiment(self, plan_id: int, config: Dict, metrics: Dict, artifacts: Dict = None, status: str = "completed") -> int:

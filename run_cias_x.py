@@ -136,8 +136,6 @@ async def run_workflow(args):
     try:
         final_state = await app.ainvoke(initial_state)
 
-        world_model.append_design_token_used(design_id=final_state.get("design_id", 0), token_used=max_token - final_state.get('token_remaining', 0))
-
         # Report results
         logger.info("=" * 60)
         logger.info("CIAS-X Workflow Completed")

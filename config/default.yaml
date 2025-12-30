@@ -43,13 +43,13 @@ design_space:
 
 # Experiment Settings
 experiment:
-  budget_max: 2 # max plans per design
+  budget_max: 10 # max plans per design
   max_tokens: 40960
   mock_mode: remote
 
 # Planner Settings
 planner:
-  max_configs_per_plan: 3 # max experiments per plan, this means the experiments = budget_max * max_configs_per_plan
+  max_configs_per_plan: 1 # max experiments per plan, this means the experiments = budget_max * max_configs_per_plan
   design_id: 1 # resume from design, 0 means start from scratch
 
 pareto:
