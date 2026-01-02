@@ -22,6 +22,7 @@ from src.cias_x.analyst import CIASAnalystAgent
 from src.cias_x.workflow import create_cias_workflow
 from src.cias_x.state import AgentState
 from src.cias_x.structures import AppConfig
+from src.cias_x.evaluator import PlanEvaluator
 
 # Setup logging
 logging.basicConfig(
@@ -89,21 +90,21 @@ async def run_workflow(_args):
     # Initialize components
     logger.info(f"Initializing CIAS-X with database: {config.database.path}, top_k={config.pareto.top_k}")
     world_model = CIASWorldModel(
-        config.database.path,
-        vector_db=config.vector_db.path,
-        vector_memory=config.vector_memory)
-
-    planner = CIASPlannerAgent(llm_client, world_model, max_configs_per_plan)
-    executor = CIASExecutorAgent(
-        llm_client,
-        world_model,
-        execution_mode=execution_mode,
-        service_url=service_url if execution_mode == "remote" else None
+        db_path=config.database.path,
+        top_k=config.pareto.top_k
     )
-    analyst = CIASAnalystAgent(llm_client, world_model)
+    llm_client = LLMClient(config.llm)
+
+    # Initialize Evaluator
+    evaluator = PlanEvaluator()
+
+    planner_agent = CIASPlannerAgent(llm_client=llm_client, world_model=world_model, max_configs_per_plan=max_configs_per_plan)
+    executor_agent = CIASExecutorAgent(llm_client=llm_client, world_model=world_model, execution_mode=execution_mode, service_url=service_url)
+    analyst_agent = CIASAnalystAgent(llm_client=llm_client, world_model=world_model, evaluator=evaluator)
+
 
     # Create workflow
-    app = create_cias_workflow(planner, executor, analyst)
+    app = create_cias_workflow(planner_agent, executor_agent, analyst_agent)
 
     # Initial state
     initial_state: AgentState = {

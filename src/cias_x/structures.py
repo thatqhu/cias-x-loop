@@ -148,31 +148,14 @@ class ExecutorSettings(BaseModel):
 class DatabaseSettings(BaseModel):
     path: str = "cias-x.db"
 
-class VectorDbSettings(BaseModel):
-    path: str = "chromadb"
-
 class DesignGoalConstraints(BaseModel):
     latency_max: float = 50.0
     compression_ratio_min: int = 16
+    psnr_min: float = 28.0
 
 class DesignGoal(BaseModel):
-    description: str = ""
+    description: str = "Maximize PSNR and minimize Latency"
     constraints: DesignGoalConstraints = Field(default_factory=DesignGoalConstraints)
-
-class NarrativeQualityThresholds(BaseModel):
-    excellent: float = 32.0
-    good: float = 28.0
-
-class NarrativeSpeedThresholds(BaseModel):
-    ultra_fast: float = 30.0
-    fast: float = 60.0
-
-class NarrativeThresholds(BaseModel):
-    quality: NarrativeQualityThresholds = Field(default_factory=NarrativeQualityThresholds)
-    speed: NarrativeSpeedThresholds = Field(default_factory=NarrativeSpeedThresholds)
-
-class VectorMemoryConfig(BaseModel):
-    narrative_thresholds: NarrativeThresholds = Field(default_factory=NarrativeThresholds)
 
 class AppConfig(BaseModel):
     """Global Application Configuration"""
@@ -183,6 +166,23 @@ class AppConfig(BaseModel):
     pareto: ParetoSettings
     executor: ExecutorSettings
     database: DatabaseSettings
-    vector_db: VectorDbSettings = Field(default_factory=VectorDbSettings)
     design_goal: Optional[DesignGoal] = None
-    vector_memory: VectorMemoryConfig = Field(default_factory=VectorMemoryConfig)
+
+class PlanEvaluationReport(BaseModel):
+    """Structured evaluation report for a plan."""
+    # Basic Stats
+    avg_psnr: float = 0.0
+    max_psnr: float = 0.0
+    avg_latency: float = 0.0
+
+    # Compliance (Hard Constraints)
+    is_compliant: bool = True
+    violations: List[str] = Field(default_factory=list)
+
+    # Tiers (Soft Benchmarks)
+    quality_tier: str = "unknown"
+    speed_tier: str = "unknown"
+
+    # Attribution
+    best_config_summary: str = ""
+    best_config_full: Dict[str, Any] = Field(default_factory=dict)

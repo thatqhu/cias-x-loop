@@ -35,7 +35,6 @@ dependencies = [
     "uvicorn>=0.20.0",
     "python-dotenv>=1.0.0",
     "langgraph>=0.0.20",
-    "chromadb>=1.4.0",
 ]
 
 [project.optional-dependencies]

@@ -22,6 +22,8 @@ from src.cias_x.structures import ExperimentResult
 logger = logging.getLogger(__name__)
 
 
+from src.cias_x.evaluator import PlanEvaluator
+
 class CIASAnalystAgent:
     """
     Analyst Agent for CIAS-X system.
@@ -33,9 +35,10 @@ class CIASAnalystAgent:
     4. Update global summary every 50 plans (using last_summary_plan_id)
     """
 
-    def __init__(self, llm_client: LLMClient, world_model: CIASWorldModel):
+    def __init__(self, llm_client: LLMClient, world_model: CIASWorldModel, evaluator: PlanEvaluator):
         self.llm_client = llm_client
         self.world_model = world_model
+        self.evaluator = evaluator
         self.name = "Analyst"
         self.global_summary_interval = 10
         logger.info("CIASAnalystAgent initialized")
@@ -90,13 +93,19 @@ class CIASAnalystAgent:
                 flat_frontiers.append(c)
 
         # 5. Generate LLM plan summary (3-6 sentences with recommendation and trends)
-        plan_summary, analysis_used = self._generate_plan_summary(current_experiments, flat_frontiers)
+        # First, run automated evaluation
+        design_goal = state.get("design_goal")
+        report = self.evaluator.evaluate(current_experiments, design_goal)
+
+        # Then generate narrative
+        plan_summary, analysis_used = self._generate_plan_summary(current_experiments, flat_frontiers, report)
 
         # 6. Update plan with summary
         latest_plan_id = self.world_model.get_latest_plan_id(design_id)
         if latest_plan_id:
             self.world_model.update_plan_summary(latest_plan_id, plan_summary)
             logger.info(f"Updated plan {latest_plan_id} with summary")
+
 
         # 7. Check if global summary needs update
         # Update global summary if threshold reached
@@ -114,8 +123,14 @@ class CIASAnalystAgent:
         # Determine next status
         next_status = "planning" if new_budget > 0 and token_remaining > 0 else "end"
 
+        # Apply top_k filter for display/Planner usage (database has full Pareto)
+        top_k = state.get("top_k", 10)
+        flat_frontiers_for_display = flat_frontiers[:top_k] if len(flat_frontiers) > top_k else flat_frontiers
+
+        logger.info(f"Returning {len(flat_frontiers_for_display)} Pareto points to Planner (full set: {len(flat_frontiers)})")
+
         return {
-            "pareto_frontiers": flat_frontiers,
+            "pareto_frontiers": flat_frontiers_for_display,  # Only top_k for Planner
             "latest_plan_summary": plan_summary,
             "budget_remaining": new_budget,
             "token_remaining": token_remaining,
@@ -138,6 +153,9 @@ class CIASAnalystAgent:
         """
         Compute Pareto frontiers grouped by strata with rank.
 
+        Note: Stores COMPLETE Pareto frontier (no truncation).
+        The top_k parameter is only used for display purposes in the return value.
+
         Returns: Dict[strata, List[{experiment_id, rank, config, metrics}]>
         """
         # Group by strata
@@ -152,94 +170,119 @@ class CIASAnalystAgent:
         result = {}
         for strata, exps in grouped.items():
             pareto = self._compute_pareto_front(exps)
-            # Sort by PSNR and assign rank
+
+            # Sort by PSNR and assign rank to ALL Pareto points
             sorted_pareto = sorted(pareto, key=lambda x: x['metrics'].get('psnr', 0), reverse=True)
 
-            # Take top-k and assign rank
-            top_k_list = []
-            for rank, item in enumerate(sorted_pareto[:top_k], start=1):
-                top_k_list.append({
+            # Assign rank to ALL points (not just top_k)
+            ranked_list = []
+            for rank, item in enumerate(sorted_pareto, start=1):
+                ranked_list.append({
                     "experiment_id": item.get('experiment_id', 0),
                     "rank": rank,
                     "config": item['config'],
                     "metrics": item['metrics']
                 })
 
-            result[strata] = top_k_list
+            result[strata] = ranked_list  # Store ALL Pareto points
 
         return result
 
     def _compute_pareto_front(self, items: List[Dict]) -> List[Dict]:
         """
-        Compute Pareto front.
-        Objectives: Maximize PSNR, Maximize Coverage, Minimize Latency
+        Compute Pareto front for SCI reconstruction.
+
+        Objectives (3D):
+        - Maximize PSNR (reconstruction quality)
+        - Maximize Coverage (spatial coverage metric)
+        - Minimize Latency (inference speed)
+
+        A point is Pareto-optimal if no other point dominates it:
+        - Dominates: better in all objectives AND strictly better in at least one
         """
         if not items:
             return []
 
-        # Extract vectors: [PSNR, Coverage, -Latency]
+        # Extract objective vectors: [PSNR, Coverage, -Latency]
+        # Note: Latency is negated so all objectives are "maximize"
         vectors = []
         for item in items:
             m = item.get('metrics', {})
+            psnr = m.get('psnr', 0)
+            coverage = m.get('coverage', 0)
+            latency = m.get('latency', 99999)
+
             vectors.append([
-                m.get('psnr', 0),
-                m.get('coverage', 0),
-                -m.get('latency', 99999)
+                psnr,       # Objective 1: Maximize PSNR
+                coverage,   # Objective 2: Maximize Coverage
+                -latency    # Objective 3: Minimize Latency (negated)
             ])
 
         vectors = np.array(vectors)
         n = len(vectors)
         is_efficient = np.ones(n, dtype=bool)
 
+        # Check for dominated points
         for i in range(n):
             if is_efficient[i]:
                 for j in range(n):
                     if i != j and is_efficient[j]:
+                        # j dominates i if: j >= i in all objectives AND j > i in at least one
                         if np.all(vectors[j] >= vectors[i]) and np.any(vectors[j] > vectors[i]):
                             is_efficient[i] = False
                             break
 
         return [items[i] for i in range(n) if is_efficient[i]]
 
-    def _generate_plan_summary(self, current_experiments: List[Dict], pareto_frontiers: List[Dict]) -> tuple[str, int]:
+    def _generate_plan_summary(
+        self,
+        current_experiments: List[Dict],
+        pareto_frontiers: List[Dict],
+        report: Any = None
+    ) -> tuple[str, int]:
         """
-        Generate plan summary using LLM.
-        Summary should be 3-6 sentences and include current experiments summary, recommendations, and trends.
+        Generate a ONE-SENTENCE tactical directive for the next Planner.
         """
         if not self.llm_client:
-            return "LLM unavailable. No summary generated."
+            return "Baseline exploration.", 0
 
-        # Format experiments
+        # Format top 3 experiments
         exp_text = ""
-        for exp in current_experiments[:5]:
+        for i, exp in enumerate(current_experiments[:3], 1):
             m = exp.get('metrics', {})
             c = exp.get('config', {})
-            exp_text += f"- PSNR={m.get('psnr', 0):.2f}dB, Latency={m.get('latency', 0):.1f}ms, "
-            fc = c.get('forward_config', {})
             rp = c.get('recon_params', {})
-            exp_text += f"CR={fc.get('compression_ratio', 'N/A')}, Stages={rp.get('num_stages', 'N/A')}\n"
+            exp_text += f"{i}. PSNR={m.get('psnr', 0):.1f}dB, Latency={m.get('latency', 0):.0f}ms, Stages={rp.get('num_stages', '?')}\n"
 
-        # Format frontiers
-        front_text = ""
-        for f in pareto_frontiers[:5]:
-            m = f.get('metrics', {})
-            r = f.get('rank', '?')
-            front_text += f"- [Rank {r}, {f.get('strata', '?')}] PSNR={m.get('psnr', 0):.2f}dB, Latency={m.get('latency', 0):.1f}ms\n"
+        # Evaluation context
+        status = "PASSED" if (report and report.is_compliant) else "FAILED"
+        violations = ", ".join(report.violations) if (report and report.violations) else "None"
+        best_config = report.best_config_summary if report else "N/A"
 
-        prompt = f"""Analyze these SCI reconstruction experiment results and provide a comprehensive summary.
+        prompt = f"""You are the Lead Scientist. Give ONE tactical directive for the next planner.
 
-## Current Batch Results
-{exp_text if exp_text else "No experiments in current batch."}
+## Evaluation Report
+- Status: {status}
+- Violations: {violations}
+- Best Config: {best_config}
 
-## Current Pareto Frontier
-{front_text if front_text else "No Pareto frontier established yet."}
+## Current Batch (Top 3)
+{exp_text if exp_text else "No experiments."}
 
-Write a summary that is 3-6 sentences total and includes:
-1. Summary of current experiments in plan scope
-2. Recommendations for what configurations to explore next
-3. Observed trends or patterns
+## Task
+Output EXACTLY ONE sentence in this format:
+"[Action] [Parameter] to [Goal]. [Optional: Avoid X.]"
 
-Output the summary text only (no JSON, no markdown, no bullet points - just a flowing paragraph of 3-6 sentences)."""
+Examples (GOOD):
+✓ "Reduce num_stages to <8 to meet latency constraint."
+✓ "Test mask_type='optimized' to break PSNR plateau at 30dB."
+✓ "Increase compression_ratio to 24 while keeping stages<7."
+
+Examples (BAD):
+✗ "The experiments show that latency is high..." (Too verbose)
+✗ "Consider trying different parameters." (Too vague)
+
+Output:"""
 
         try:
             response = self.llm_client.chat([{"role": "user", "content": prompt}])
@@ -249,33 +292,69 @@ Output the summary text only (no JSON, no markdown, no bullet points - just a fl
             return "Summary generation failed.", 0
 
     def _update_global_summary(self, design_id: int) -> tuple[str, int]:
-        """Generate and save updated global summary."""
-        plan_id = self.world_model.get_last_summary_plan_id_in_design(design_id)
-        plan_id = plan_id if plan_id else 1
-        recent_summaries = self.world_model.get_plan_summaries_since(design_id, plan_id)
-        old_summary = self.world_model.get_global_summary(design_id)
-
+        """Generate and save updated global summary as an Exploration Map."""
         if not self.llm_client:
             return "", 0
 
-        # Build prompt
-        recent_text = "\n".join([f"- {s}" for s in recent_summaries])
+        # Get all Pareto frontiers for this design
+        pareto_configs = self.world_model.get_all_pareto_frontiers(design_id)
 
-        prompt = f"""Update the global research summary based on recent experiment batches.
+        # Get design space from state (we'll need to pass it in analyze method)
+        # For now, use a default or retrieve from DB if stored
+        design_space_dict = self.world_model.get_design_space(design_id)
 
-## Previous Global Summary
-{old_summary if old_summary else "No previous summary (initial phase)."}
+        if not pareto_configs:
+            return "No experiments completed yet.", 0
 
-## Recent Batch Summaries (last {len(recent_summaries)} batches)
-{recent_text if recent_text else "No recent summaries."}
+        # Format Pareto configs for LLM
+        config_text = ""
+        for i, item in enumerate(pareto_configs[:20], 1):  # Limit to top 20
+            cfg = item.get('config', {})
+            m = item.get('metrics', {})
+            fc = cfg.get('forward_config', {})
+            rp = cfg.get('recon_params', {})
+            config_text += f"{i}. CR={fc.get('compression_ratio')}, Mask={fc.get('mask_type')}, "
+            config_text += f"Stages={rp.get('num_stages')}, Feat={rp.get('num_features')} "
+            config_text += f"→ PSNR={m.get('psnr', 0):.1f}dB, Lat={m.get('latency', 0):.0f}ms\n"
 
-Write a consolidated Global Summary (5-10 sentences) that:
-1. Identifies the overall best-performing configurations
-2. Notes failed approaches or poor parameter regions
-3. Highlights robust trends discovered
-4. Suggests promising directions for future exploration
+        # Format design space
+        ds_text = ""
+        if design_space_dict:
+            ds_text = f"""
+Design Space:
+- CRs: {design_space_dict.get('compression_ratios', [])}
+- Masks: {design_space_dict.get('mask_types', [])}
+- Stages: {design_space_dict.get('num_stages', [])}
+- Features: {design_space_dict.get('num_features', [])}
+"""
 
-Output the summary text only (no JSON, no markdown)."""
+        prompt = f"""You are the Project Director reviewing {len(pareto_configs)} completed experiments.
+
+## Tested Configurations (Pareto Frontier)
+{config_text}
+{ds_text}
+
+## Task
+Create an Exploration Map with 3 sections (2-3 sentences each):
+
+1. **Exploited** (Well-tested regions):
+   - Which parameter combinations are thoroughly explored?
+   - Example: "CR=16 fully tested with stages 5-12."
+
+2. **Gaps** (Unexplored valid regions):
+   - Which valid Design Space combinations are untested?
+   - Example: "CR=24 never tried. mask='optimized' unexplored."
+
+3. **Patterns** (Discovered rules):
+   - Any reliable cause-effect relationships?
+   - Example: "stages>10 always violates latency<50ms."
+
+Format:
+Exploited: [2-3 sentences]
+Gaps: [2-3 sentences]
+Patterns: [1-2 rules]
+
+Output:"""
 
         try:
             response = self.llm_client.chat([{"role": "user", "content": prompt}])
@@ -283,12 +362,18 @@ Output the summary text only (no JSON, no markdown)."""
 
             # Save to DB
             self.world_model.update_global_summary(design_id, new_summary)
-            logger.info(f"Updated global summary (new baseline plan_id: {plan_id})")
+
+            # Update last summary plan ID
+            latest_plan_id = self.world_model.get_latest_plan_id(design_id)
+            if latest_plan_id:
+                self.world_model.update_last_summary_plan_id(design_id, latest_plan_id)
+
+            logger.info(f"Updated global summary (Exploration Map)")
 
             return new_summary, response['tokens']
         except Exception as e:
             logger.error(f"Global summary update failed: {e}")
-            return old_summary, 0
+            return "", 0
 
     def _to_serializable(self, obj: Any) -> Any:
         """Recursively convert to JSON-serializable format."""

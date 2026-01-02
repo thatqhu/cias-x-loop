@@ -11,8 +11,6 @@ import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from contextlib import contextmanager
-import chromadb
-from .structures import VectorMemoryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +27,13 @@ class CIASWorldModel:
     """
 
     def __init__(self, db_path: str = "cias_x.db",
-        vector_db: str = "chromadb",
-        vector_memory: VectorMemoryConfig = VectorMemoryConfig()):
+        top_k: int = 5):
         self.db_path = db_path
+        self.top_k = top_k
         self._init_db()
-        self.vector_memory = vector_memory
-        self.chroma_client = chromadb.PersistentClient(path=vector_db)
-        logger.info(f"CIASWorldModel initialized with database: {db_path} and {vector_db}")
+        logger.info(f"CIASWorldModel initialized with database: {db_path}, top_k={top_k}")
+
+    # ... (other methods) ...
 
     @contextmanager
     def _get_conn(self):
@@ -161,6 +159,16 @@ class CIASWorldModel:
             cursor.execute(
                 "UPDATE designs SET global_summary = ?, last_summary_plan_id = ?, updated_at = ? WHERE id = ?",
                 (summary, last_plan_id, datetime.now().isoformat(), design_id)
+            )
+            conn.commit()
+
+    def update_last_summary_plan_id(self, design_id: int, plan_id: int):
+        """Update the last_summary_plan_id for a design."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE designs SET last_summary_plan_id = ?, updated_at = ? WHERE id = ?",
+                (plan_id, datetime.now().isoformat(), design_id)
             )
             conn.commit()
 
@@ -320,24 +328,6 @@ class CIASWorldModel:
             conn.commit()
             exp_id = cursor.lastrowid
 
-        # 3. Save to Vector Store (ChromaDB)
-        try:
-            narrative = self._create_experiment_narrative(config_dict, metrics_dict)
-
-            # Metadata for pre-filtering
-            metadata = {
-                "plan_id": plan_id,
-                "algo": config_dict.get('recon_family', 'Unknown'),
-                "cr": config_dict.get('forward_config', {}).get('compression_ratio', 0),
-                "psnr": metrics_dict.get('psnr', 0.0),
-                "latency": metrics_dict.get('latency', 0.0)
-            }
-
-            self._save_to_vector_store(exp_id, narrative, metadata)
-
-        except Exception as e:
-            logger.warning(f"Failed to save to vector store: {e}")
-
         return exp_id
 
     def get_experiments_by_plan(self, plan_id: int) -> List[Dict]:
@@ -359,6 +349,40 @@ class CIASWorldModel:
                 }
                 for r in rows
             ]
+
+    def get_all_experiments_by_design(self, design_id: int) -> List[Dict]:
+        """
+        Get ALL experiments for a design across all plans.
+        Critical for accurate Pareto frontier calculation.
+        """
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT e.id, e.experiment_id, e.config, e.metrics
+                   FROM experiments e
+                   JOIN plans p ON e.plan_id = p.id
+                   WHERE p.design_id = ?""",
+                (design_id,)
+            )
+            rows = cursor.fetchall()
+
+            results = []
+            for r in rows:
+                config = json.loads(r[2])
+                metrics = json.loads(r[3])
+
+                # Determine strata (algorithm family)
+                strata = config.get('recon_family', 'Unknown')
+
+                results.append({
+                    "id": r[0],
+                    "experiment_id": r[1],
+                    "config": config,
+                    "metrics": metrics,
+                    "strata": strata
+                })
+
+            return results
 
     # ==================== Pareto Frontiers (with Rank and Strata) ====================
 
@@ -394,6 +418,39 @@ class CIASWorldModel:
                 }
                 for r in rows
             ]
+
+    def get_all_pareto_frontiers(self, design_id: int) -> List[Dict]:
+        """Get all Pareto frontiers for a specific design (across all plans)."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT pf.id, pf.experiment_id, pf.rank, pf.strata, pf.config, pf.metrics
+                   FROM pareto_frontiers pf
+                   JOIN experiments e ON pf.experiment_id = e.experiment_id
+                   JOIN plans p ON e.plan_id = p.id
+                   WHERE p.design_id = ?
+                   ORDER BY pf.rank ASC""",
+                (design_id,)
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "experiment_id": r[1],
+                    "rank": r[2],
+                    "strata": r[3],
+                    "config": json.loads(r[4]),
+                    "metrics": json.loads(r[5])
+                }
+                for r in rows
+            ]
+
+    def get_design_space(self, design_id: int) -> Dict:
+        """Get design space for a specific design. Returns None if not stored."""
+        # Currently design space is not stored in DB, return None
+        # In the future, we could store it in designs table
+        return None
+
 
     def update_pareto_frontiers(self, strata: str, new_frontiers: List[Dict]):
         """
@@ -437,74 +494,3 @@ class CIASWorldModel:
             else:
                 cursor.execute("DELETE FROM pareto_frontiers")
             conn.commit()
-
-    def _create_experiment_narrative(self, config: Dict, metrics: Dict) -> str:
-        """
-        Create a semantic string representation of the experiment for vector embedding.
-        Focus on causal relationships: What parameters led to what results?
-        """
-        # 1. Extract Metrics (Result)
-        psnr = metrics.get('psnr', 0)
-        latency = metrics.get('latency', 0)
-
-        # Add descriptive adjectives for semantic search (e.g., "high quality", "fast")
-        quality = self.vector_memory.narrative_thresholds.quality
-        speed = self.vector_memory.narrative_thresholds.speed
-        quality_adj = "excellent" if psnr > quality.excellent else "good" if psnr> quality.good else "poor"
-        speed_adj = "ultra-fast" if latency < speed.ultra_fast else "fast" if latency < speed.fast else "slow"
-
-        # 2. Extract Config (Cause)
-        algo = config.get('recon_family', 'CIAS-Core-ELP')
-        fc = config.get('forward_config', {})
-        rp = config.get('recon_params', {})
-
-        cr = fc.get('compression_ratio', 0)
-        mask = fc.get('mask_type', 'random')
-        stages = rp.get('num_stages', 0)
-        features = rp.get('num_features', 0)
-
-        # 3. Construct Narrative Template
-        # Pattern: [Result Adjectives] result with [Main Metrics]. Achieved by [Algorithm] with [Key Params].
-        narrative = (
-            f"A {quality_adj} quality (PSNR {psnr:.2f}dB) and {speed_adj} speed ({latency:.1f}ms) result. "
-            f"Achieved by {algo} algorithm with {stages} stages and {features} features "
-            f"at compression ratio {cr} using {mask} mask."
-        )
-
-        return narrative
-
-    def _save_to_vector_store(self, exp_id: int, narrative: str, metadata: Dict):
-        """Save narrative to ChromaDB with metadata for filtering."""
-        if not hasattr(self, 'collection') or self.collection is None:
-             self.collection = self.chroma_client.get_or_create_collection(name="experiments_memory")
-
-        # Add to collection
-        self.collection.add(
-            documents=[narrative],
-            metadatas=[metadata],
-            ids=[str(exp_id)]
-        )
-        logger.debug(f"Saved experiment {exp_id} to vector store.")
-
-    def retrieve_relevant_experiments(self, query: str, k: int = 5) -> List[str]:
-        """
-        Retrieve relevant historical experiments from vector store.
-
-        Args:
-            query: Semantic query string (e.g. "Low latency model with good PSNR")
-            k: Number of results
-
-        Returns:
-            List of narrative strings
-        """
-        if not hasattr(self, 'collection') or self.collection is None:
-             self.collection = self.chroma_client.get_or_create_collection(name="experiments_memory")
-
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=k
-        )
-
-        if results and results['documents']:
-            return results['documents'][0]  # Chroma returns List[List[str]]
-        return []

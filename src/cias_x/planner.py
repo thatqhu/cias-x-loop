@@ -89,13 +89,13 @@ class CIASPlannerAgent:
         else:
             # Use LLM to generate configs
             logger.info("Using LLM to generate new configs based on history.")
-            historical_context = self.world_model.retrieve_relevant_experiments(design_goal.description)
+
             new_configs, token_used = self._llm_generate_configs(
-                global_summary,
-                latest_plan_summary,
-                pareto_frontiers,
-                design_space,
-                historical_context,
+                global_summary=global_summary,
+                latest_plan_summary=latest_plan_summary,
+                pareto_frontiers=pareto_frontiers,
+                design_space=design_space,
+                design_goal=design_goal,
                 top_k=state.get("top_k", 10)
             )
 
@@ -119,89 +119,104 @@ class CIASPlannerAgent:
         self,
         global_summary: str,
         latest_plan_summary: str,
-        pareto_frontiers: List[Dict],
+        anchors: List[Dict],
         design_space: DesignSpace = DesignSpace(),
-        historical_context: str = "",
-        top_k: int = 10
+        design_goal: DesignGoal = DesignGoal(),
     ) -> str:
-        """Build the LLM prompt for config generation."""
-        # Format frontiers with rank
-        frontier_text = ""
-        if pareto_frontiers:
-            frontier_text = "## Current Pareto Frontiers (Best Trade-offs)\n"
-            for item in pareto_frontiers[:top_k]:
-                cfg = item.get('config', {})
-                metrics = item.get('metrics', {})
-                strata = item.get('strata', 'unknown')
-                rank = item.get('rank', '?')
-                frontier_text += f"[Rank {rank}, {strata}] PSNR={metrics.get('psnr', 0):.2f}dB, "
-                frontier_text += f"Latency={metrics.get('latency', 0):.1f}ms, "
+        """Build the hierarchical Planner prompt using Global Map + Plan Directive + Anchors."""
+
+        # 1. Goal
+        goal_text = f"## 🎯 Design Goal\n{design_goal.description}\n"
+        if design_goal.constraints:
+            cons = design_goal.constraints
+            goal_text += "**Constraints**:\n"
+            goal_text += f"- Latency <= {cons.latency_max}ms\n"
+            goal_text += f"- Compression Ratio >= {cons.compression_ratio_min}\n"
+            goal_text += f"- PSNR >= {cons.psnr_min}dB\n"
+
+        # 2. Strategic Context (Exploration Map)
+        strategy_text = "## 🗺️ Strategic Context (Exploration Map)\n"
+        if global_summary:
+            strategy_text += f"{global_summary}\n"
+        else:
+            strategy_text += "No history yet. Baseline exploration phase.\n"
+
+        # 3. Tactical Directive (Latest Plan Summary)
+        directive_text = "## 🎯 Tactical Directive (Current Mission)\n"
+        if latest_plan_summary:
+            directive_text += f"**{latest_plan_summary}**\n"
+        else:
+            directive_text += "Baseline exploration.\n"
+
+        # 4. Anchors
+        anchor_text = "## ⚓ Anchor Configurations (Reference Points)\n"
+        if anchors:
+            for i, anc in enumerate(anchors, 1):
+                cfg = anc.get('config', {})
+                m = anc.get('metrics', {})
                 fc = cfg.get('forward_config', {})
                 rp = cfg.get('recon_params', {})
-                frontier_text += f"CR={fc.get('compression_ratio', 'N/A')}, "
-                frontier_text += f"Stages={rp.get('num_stages', 'N/A')}\n"
 
-        # Format summary
-        summary_text = f"## Global Summary\n{global_summary}\n" if global_summary else "## Global Summary\nNo summary yet (initial exploration phase).\n"
+                # Determine status
+                lat = m.get('latency', 0)
+                cr = fc.get('compression_ratio', 0)
+                psnr = m.get('psnr', 0)
+                status = "✅ Compliant"
+                if design_goal.constraints:
+                    if lat > design_goal.constraints.latency_max or cr < design_goal.constraints.compression_ratio_min:
+                        status = "❌ Violation"
 
-        latest_plan_summary = f"## Last Plan Summary\n{latest_plan_summary}\n" if latest_plan_summary else "## Last Plan Summary\nNo summary yet (initial exploration phase).\n"
+                anchor_text += f"**Ref {i}** ({status}): "
+                anchor_text += f"PSNR={psnr:.1f}dB, Latency={lat:.0f}ms. "
+                anchor_text += f"Params: CR={fc.get('compression_ratio')}, Mask={fc.get('mask_type')}, "
+                anchor_text += f"Stages={rp.get('num_stages')}, Channels={rp.get('num_features')}\n"
+        else:
+            anchor_text += "No Pareto points yet. Generate baseline configs.\n"
 
-        context_text = ""
-        if historical_context:
-            context_items = "\n".join([f"- {item}" for item in historical_context])
+        # 5. Design Space
+        ds_json = json.dumps(design_space.model_dump(), indent=2)
 
-        context_text = f"""
-## Relevant Historical Experience (Memory)
-We retrieved similar experiments from the archives based on your current goal:
-{context_items}
-**Instruction**: Analyze these historical outcomes carefully.
-- If they succeeded, try to exploit similar parameters.
-- If they failed, avoid those specific combinations.
-"""
-        logger.info(f"Context Text: {context_text}")
-        # Format design space
-        ds_text = f"## Design Space (Valid Options)\n```json\n{json.dumps(design_space.model_dump(), indent=2)}\n```\n"
+        prompt = f"""You are an Optimization Specialist for SCI reconstruction.
 
-        prompt = f"""You are an AI Scientist optimizing SCI (Snapshot Compressive Imaging) reconstruction.
+{goal_text}
+{strategy_text}
+{directive_text}
+{anchor_text}
 
-{summary_text}
+## 🛠️ Task
+Propose {self.max_configs_per_plan} NEW configurations that:
 
-{latest_plan_summary}
+**Priority 1 (MUST)**: Follow the Tactical Directive
+**Priority 2**: Explore the Gaps mentioned in Strategic Context
+**Priority 3**: Apply discovered Patterns to avoid known failures
 
-{context_text}
+**Strategy**:
+- If Anchor is ✅ Compliant: Tweak slightly to improve (Exploitation)
+- If Anchor is ❌ Violation: Fix the specific parameter mentioned in Directive (Repair)
+- If Directive suggests new direction: Try it (Exploration)
 
-{frontier_text}
-
-{ds_text}
-
-## Task
-Based on the global summary (identifying under-explored regions) and the current Pareto frontiers,
-propose {self.max_configs_per_plan} NEW experiment configurations that:
-
-1. **Exclude all**: Any failed summary text.
-1. **Explore gaps**: Target under-explored parameter combinations mentioned in the summary
-2. **Exploit frontiers**: Refine promising configurations from the Pareto front
-3. **Diversify**: Ensure variety in proposed configs
+## Design Space (Allowed Values)
+```json
+{ds_json}
+```
 
 ## Output Format
-Return ONLY valid JSON with this structure:
+Return valid JSON only:
 {{
     "configs": [
         {{
             "compression_ratio": <int>,
-            "mask_type": "<string>",
+            "mask_type": "<str>",
             "num_stages": <int>,
             "num_features": <int>,
             "num_blocks": <int>,
             "learning_rate": <float>,
-            "activation": "<string>",
-            "rationale": "<brief reason for this config>"
+            "activation": "<str>",
+            "rationale": "Following directive: reduced stages to 6 to fix latency."
         }}
     ]
 }}
-
-Ensure all values are from the Design Space options."""
-
+"""
         return prompt
 
     def _llm_generate_configs(
@@ -210,7 +225,7 @@ Ensure all values are from the Design Space options."""
         latest_plan_summary: str,
         pareto_frontiers: List[Dict],
         design_space: DesignSpace = DesignSpace(),
-        historical_context: str = "",
+        design_goal: DesignGoal = DesignGoal(),
         top_k: int = 10
     ) -> tuple[List[SCIConfiguration], int]:
         """Use LLM to generate experiment configurations."""
@@ -218,13 +233,15 @@ Ensure all values are from the Design Space options."""
             logger.warning("No LLM client available")
             return [], 0
 
+        # Select Anchors
+        anchors = self._select_anchor_configs(pareto_frontiers, design_goal)
+
         prompt = self._build_planner_prompt(
-            global_summary,
-            latest_plan_summary,
-            pareto_frontiers,
-            design_space,
-            historical_context,
-            top_k
+            global_summary=global_summary,
+            latest_plan_summary=latest_plan_summary,
+            anchors=anchors,
+            design_space=design_space,
+            design_goal=design_goal
         )
 
         messages = [
@@ -233,27 +250,173 @@ Ensure all values are from the Design Space options."""
         ]
 
         try:
-            response = self.llm_client.chat(messages, response_format="json")
+            response = self.llm_client.chat(messages)
             content = response['content']
             token_used = response['tokens']
 
             # Parse JSON
-            json_content = self._extract_json(content)
-            data = json.loads(json_content)
-            raw_configs = data.get("configs", [])
+            # clean strict ```json ... ``` wrapper if present
+            content = content.replace("```json", "").replace("```", "").strip()
 
-            # Convert to SCIConfiguration objects
-            valid_configs = []
-            for raw in raw_configs:
-                config = self._create_config_from_dict(raw, design_space)
-                if config:
-                    valid_configs.append(config)
+            data = json.loads(content)
+            configs_json = data.get("configs", [])
 
-            return valid_configs, token_used
+            new_configs = []
+            for cfg in configs_json:
+                # Validate against design space (simple check)
+                # Map logic... (Assuming LLM follows instructions)
+
+                # Construct SCIConfiguration object
+                sci_config = SCIConfiguration(
+                    forward_config=ForwardConfig(
+                        compression_ratio=cfg.get('compression_ratio', 16),
+                        mask_type=cfg.get('mask_type', 'random')
+                    ),
+                    recon_params=ReconParams(
+                        num_stages=cfg.get('num_stages', 9),
+                        num_features=cfg.get('num_features', 64),
+                        num_blocks=cfg.get('num_blocks', 1),
+                        learning_rate=cfg.get('learning_rate', 1e-4) # simplified
+                    )
+                )
+                new_configs.append(sci_config)
+
+            return new_configs, token_used
 
         except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
+            logger.error(f"LLM config generation failed: {e}")
             return [], 0
+
+    def _select_anchor_configs(self, pareto_frontiers: List[Dict], design_goal: DesignGoal, top_k: int = 3) -> List[Dict]:
+        """
+        从 Pareto 前沿中智能选择 Anchors（三阶段策略）。
+
+        Pareto 前沿保持纯粹的数学定义（不预过滤），约束仅在此处应用。
+
+        策略：
+        1. Compliant Anchors: 已达标的最优点（Exploitation）
+        2. Repairable Anchors: 接近达标的点（Repair）
+        3. Diverse Anchors: 不同策略的边界点（Exploration）
+
+        Args:
+            pareto_frontiers: 完整的 Pareto 前沿（所有实验）
+            design_goal: 设计目标（包含约束）
+            top_k: 返回的 Anchor 数量
+
+        Returns:
+            精选的 Anchor 配置列表
+        """
+        if not pareto_frontiers:
+            return []
+
+        cons = design_goal.constraints if design_goal else None
+        if not cons:
+            # 没有约束，直接返回 Top-K Pareto 点（按 PSNR 排序）
+            sorted_pareto = sorted(pareto_frontiers, key=lambda x: x.get('metrics', {}).get('psnr', 0), reverse=True)
+            return sorted_pareto[:top_k]
+
+        # === 分类 Pareto 点 ===
+        compliant = []      # 完全达标
+        repairable = []     # 轻微违规（可修复）
+        exploratory = []    # 其他（用于探索）
+
+        for item in pareto_frontiers:
+            m = item.get('metrics', {})
+            cfg = item.get('config', {})
+
+            lat = m.get('latency', 9999)
+            psnr = m.get('psnr', 0)
+            cr = cfg.get('forward_config', {}).get('compression_ratio', 0)
+
+            # 检查每个约束
+            lat_ok = lat <= cons.latency_max
+            psnr_ok = psnr >= cons.psnr_min
+            cr_ok = cr >= cons.compression_ratio_min
+
+            if lat_ok and psnr_ok and cr_ok:
+                # 完全达标
+                compliant.append(item)
+            elif self._is_repairable(lat, psnr, cr, cons):
+                # 轻微违规（可修复）
+                repairable.append(item)
+            else:
+                # 严重违规或用于探索
+                exploratory.append(item)
+
+        # === 选择策略 ===
+        anchors = []
+
+        # Stage 1: Compliant Anchors（优先级最高）
+        if compliant:
+            # 按 PSNR 排序，选最好的
+            compliant.sort(key=lambda x: x['metrics'].get('psnr', 0), reverse=True)
+            anchors.append(compliant[0])
+            logger.info(f"Selected Compliant Anchor: PSNR={compliant[0]['metrics'].get('psnr'):.1f}dB")
+
+            # 如果还有空间，选第二好的（增加多样性）
+            if len(compliant) > 1 and len(anchors) < top_k:
+                anchors.append(compliant[1])
+
+        # Stage 2: Repairable Anchors（次优）
+        if len(anchors) < top_k and repairable:
+            # 按"修复难度"排序（违规幅度最小的优先）
+            repairable.sort(key=lambda x: self._compute_repair_difficulty(x, cons))
+            anchors.append(repairable[0])
+            logger.info(f"Selected Repairable Anchor: PSNR={repairable[0]['metrics'].get('psnr'):.1f}dB (needs repair)")
+
+        # Stage 3: Diverse Anchors（保底探索）
+        if len(anchors) < top_k and exploratory:
+            # 优先选择 Rank 1 的点（真正的 Pareto 边界）
+            rank1 = [e for e in exploratory if e.get('rank') == 1]
+
+            if rank1:
+                # 选择与已有 Anchors Strata 不同的点
+                selected_strata = {a.get('strata') for a in anchors}
+                for exp in rank1:
+                    if exp.get('strata') not in selected_strata:
+                        anchors.append(exp)
+                        logger.info(f"Selected Diverse Anchor: Strata={exp.get('strata')} (exploration)")
+                        break
+
+            # 如果还不够，随便选一个高质量的
+            if len(anchors) < top_k:
+                exploratory.sort(key=lambda x: x.get('metrics', {}).get('psnr', 0), reverse=True)
+                anchors.append(exploratory[0])
+
+        # 如果实在没有任何点，返回空
+        if not anchors:
+            logger.warning("No suitable anchors found in Pareto frontier!")
+
+        return anchors[:top_k]
+
+    def _is_repairable(self, lat: float, psnr: float, cr: int, cons) -> bool:
+        """判断是否属于"可修复"类别（轻微违规）"""
+        # 定义"轻微违规"的阈值（例如超出 20% 以内）
+        lat_repairable = lat <= cons.latency_max * 1.2
+        psnr_repairable = psnr >= cons.psnr_min * 0.85
+        cr_repairable = cr >= cons.compression_ratio_min * 0.9
+
+        # 至少一项违规，但所有项都在可修复范围内
+        violations = sum([lat > cons.latency_max, psnr < cons.psnr_min, cr < cons.compression_ratio_min])
+        return violations > 0 and lat_repairable and psnr_repairable and cr_repairable
+
+    def _compute_repair_difficulty(self, exp: Dict, cons) -> float:
+        """计算修复难度（分数越低越容易修复）"""
+        m = exp.get('metrics', {})
+        cfg = exp.get('config', {})
+
+        lat = m.get('latency', 9999)
+        psnr = m.get('psnr', 0)
+        cr = cfg.get('forward_config', {}).get('compression_ratio', 0)
+
+        # 计算各项违规的"幅度"
+        lat_gap = max(0, lat - cons.latency_max) / cons.latency_max
+        psnr_gap = max(0, cons.psnr_min - psnr) / cons.psnr_min
+        cr_gap = max(0, cons.compression_ratio_min - cr) / cons.compression_ratio_min
+
+        # PSNR 更难修（权重更高），Latency 相对容易（可以减 stages）
+        return lat_gap * 1.0 + psnr_gap * 2.0 + cr_gap * 1.5
+
 
     def _extract_json(self, content: str) -> str:
         """Extract JSON from response, handling markdown code blocks."""
